@@ -1,0 +1,25 @@
+SELECT
+  LAST_DAY(tpv.TransactionDate) AS Mes,
+    clients.SalesStructureNameLevel5 AS Polo,
+    carteira.Grupo_1 as Regional,
+    carteira.Grupo_2 as Distrito,
+  SUM(tpv.TPV) AS TPV,
+  COUNT(tpv.TPV > 0) AS Base_Ativa
+
+FROM
+  `ctra-comercial-1554819299431.core_dw_replica.FactTPV` tpv
+JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` aff
+ON tpv.ClientAlternateKey = aff.ClientAlternateKey
+JOIN `ctra-comercial-1554819299431.core_dw_replica.ClientListHubs` clients
+ON clients.ClientKey = aff.ClientKey 
+JOIN `ctra-comercial-1554819299431.funil_de_vendas.headcount` carteira
+ON carteira.Grupo_3 = clients.SalesStructureNameLevel5
+
+WHERE LAST_DAY(TransactionDate) >= '2021-03-31'
+AND SalesStructureNameLevel1 = 'POLOS'
+AND SalesStructureNameLevel2 = 'FRANQUIA'
+
+GROUP BY Mes,
+        clients.SalesStructureNameLevel5,
+        carteira.Grupo_1,
+        carteira.Grupo_2
