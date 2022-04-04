@@ -1,0 +1,4 @@
+SELECT * FROM `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` dim 
+JOIN `ctra-comercial-1554819299431.core_dw_replica.DimSalesStructure` sf
+ON dim.SalesStructureKey = sf.SalesStructureKey
+WHERE ClientAlternateKey = 166565824
