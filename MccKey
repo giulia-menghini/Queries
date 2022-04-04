@@ -1,0 +1,7 @@
+SELECT  dim.ClientAlternateKey,
+        dim.MccKey,
+        Duration,
+FROM `ctra-comercial-1554819299431.core_dw_replica.DimMcc` mcc
+JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` dim
+ON mcc.MccKey = dim.MccKey
+WHERE SalesForceName = 'FRANQUIA'
