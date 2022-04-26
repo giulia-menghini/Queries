@@ -1,0 +1,100 @@
+DECLARE sc INT64;
+DECLARE mesinicial DATE;
+DECLARE mesfinal DATE;
+SET sc = 152911544; -- Stonecode
+SET mesinicial = '2022-03-01'; -- Dia 1 do mês inicial
+SET mesfinal = '2022-03-01'; -- Dia 1 do mês final
+WITH NetMDR AS
+(SELECT
+    LAST_DAY(tpv.TransactionDate) as referencedate,
+    aff.ClientAlternateKey as stonecode,
+    SUM(tpv.TPV) AS TPV,
+    SUM(tpv.DIA) AS NetMDR,
+    SUM(tpv.Transactions) AS Transacoes
+FROM `ctra-comercial-1554819299431.core_dw_replica.FactTPV` tpv
+JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` aff
+    ON tpv.AffiliationKey = aff.AffiliationKey
+WHERE 1=1
+    AND aff.ClientAlternateKey = sc
+    AND tpv.TransactionDate >= mesinicial
+    AND tpv.TransactionDate <= LAST_DAY(mesfinal)
+GROUP BY
+    LAST_DAY(tpv.TransactionDate),
+    aff.ClientAlternateKey
+),
+RAV AS
+(
+SELECT
+    LAST_DAY(rav.ContractDate) as referencedate,
+    aff.ClientAlternateKey as stonecode,
+    SUM(rav.GrossValue) AS TPV_Antecipado,
+    SUM(rav.Revenue) AS ReceitaRAV,
+    SUM(rav.FundingCost) AS FundingCost
+FROM `ctra-comercial-1554819299431.core_dw_replica.FactRav` rav
+JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` aff
+    ON rav.AffiliationKey = aff.AffiliationKey
+WHERE 1=1
+    AND aff.ClientAlternateKey = sc
+    AND rav.ContractDate >= mesinicial
+    AND rav.ContractDate <= LAST_DAY(mesfinal)
+GROUP BY
+    LAST_DAY(rav.ContractDate),
+    aff.ClientAlternateKey
+),
+RENTAL AS
+(
+SELECT
+    LAST_DAY(rental.dt_date) AS referencedate,
+    rental.str_stonecode AS stonecode,
+    SUM(rental.flo_amount) AS rental
+FROM `ctra-comercial-1554819299431.core_apurations.tb_monthly_billing_charges` rental
+JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` aff
+    ON rental.str_stonecode = CAST(aff.ClientAlternateKey AS STRING)
+WHERE 1=1
+    AND aff.ClientAlternateKey = sc
+    AND rental.str_chargeable IN ('stone.rent', 'stone.rent.volume-exemption')
+    AND dt_date >= mesinicial
+    AND dt_date <= LAST_DAY(mesfinal)
+GROUP BY
+    LAST_DAY(dt_date),
+    stonecode
+)
+/*Maquinas AS
+(SELECT
+    codcliente,
+    COUNT(numeroserie) AS POS,
+    COUNT(CASE WHEN tipoequipamento IN ('SERIAL-USB', 'USB', 'SERIAL-USB') THEN 1 ELSE NULL END) AS Pinpad
+FROM `dataplatform-prd.sop_workfinity.stock`
+WHERE tipoequipamento in ('BLUETOOTH','GPRS','SERIAL','GPRS-WIFI','SMART POS','ETHERNET-BLUETOOTH','POS TEF','ETHERNET','MPOS-TOUCH','SERIAL-USB','USB','BLUETOOTH-GPRS')
+AND contratante IN ('STONE PAGAMENTOS')
+AND situacao = 'EM PRODUÇÃO'
+AND codcliente IS NOT NULL
+GROUP BY codcliente
+)*/
+SELECT
+    NetMDR.referencedate,
+    NetMDR.stonecode,
+    NetMDR.TPV,
+    NetMDR.NetMDR,
+    NetMDR.Transacoes,
+    RAV.TPV_Antecipado,
+    RAV.ReceitaRAV,
+    RAV.FundingCost,
+    RENTAL.rental,
+    NetMDR.NetMDR*(1-0.1125)*0.4 AS RebateNetMDR,
+    RAV.ReceitaRAV*(1-0.0465)*0.4 AS RebateRAV,
+    RENTAL.rental*(1-0.0925)*0.4 AS RebateRental,
+    30 AS Recorrencia_Logistica,
+    -54 AS CSP,
+    CASE
+        WHEN NetMDR.NetMDR*(1-0.1125)*0.4
+            + RAV.ReceitaRAV*(1-0.0465)*0.4
+            + RENTAL.rental*(1-0.0925)*0.4
+            + 30 - 47 >= 0 THEN NetMDR.NetMDR*(1-0.1125)*0.4 + RAV.ReceitaRAV*(1-0.0465)*0.4 + RENTAL.rental*(1-0.0925)*0.4 - 17
+        ELSE -17
+    END AS RebateLucroBruto
+FROM NetMDR
+LEFT JOIN RAV
+    ON NetMDR.stonecode = RAV.stonecode AND NetMDR.referencedate = RAV.referencedate
+LEFT JOIN RENTAL
+    ON CAST(NetMDR.stonecode AS STRING) = RENTAL.stonecode AND NetMDR.referencedate = RENTAL.referencedate
