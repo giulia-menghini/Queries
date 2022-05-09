@@ -1,0 +1,10 @@
+SELECT  
+  ReferenceMonth,
+  SalesStructureNameLevel5,
+  SUM(RentalRevenueD) AS Mensalidade
+FROM `ctra-comercial-1554819299431.core_apurations.hubs_daily_rental_2022_04_30`
+WHERE ReferenceMonth = '2022-04-30'
+AND SalesStructureNameLevel2 = 'FRANQUIA'
+GROUP BY 
+  ReferenceMonth,
+  SalesStructureNameLevel5
