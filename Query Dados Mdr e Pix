@@ -1,0 +1,144 @@
+WITH TPV AS
+
+(
+  SELECT
+    LAST_DAY(tpv.TransactionDate) as mes_referencia,
+    hub.SalesStructureNameLevel5 as polo,
+    SUM(case when tpv.ProductKey = 1 then tpv.DIA else 0 end) as net_mdr_debito,
+    SUM(case when tpv.ProductKey = 2 then tpv.DIA else 0 end) as net_mdr_credito,
+    SUM(case when tpv.ProductKey = 1 THEN tpv.TPV else 0 end) as tpv_debito,
+    SUM(case when tpv.ProductKey = 2 THEN tpv.TPV else 0 end) as tpv_credito,
+    SUM(case when tpv.ProductKey = 1 THEN tpv.MDR else 0 end) as mdr_debito,
+    SUM(case when tpv.ProductKey = 2 THEN tpv.MDR else 0 end) as mdr_credito,
+    SUM(case when tpv.ProductKey = 1 then tpv.DIA else 0 end)/nullif(SUM(case when tpv.ProductKey = 1 THEN tpv.TPV else 0 end), 0) as pct_net_mdr_debito,
+    SUM(case when tpv.ProductKey = 2 then tpv.DIA else 0 end)/nullif(SUM(case when tpv.ProductKey = 2 THEN tpv.TPV else 0 end), 0) as pct_net_mdr_credito
+  FROM
+    `ctra-comercial-1554819299431.core_dw_replica.FactTPV` tpv
+  JOIN
+    `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` aff
+      ON tpv.AffiliationKey = aff.AffiliationKey
+  JOIN
+    `ctra-comercial-1554819299431.core_dw_replica.ClientListHubs` hub
+      ON aff.ClientKey = hub.ClientKey
+  WHERE 1=1
+    AND LAST_DAY(tpv.TransactionDate) >= '2021-04-01'
+    AND LAST_DAY(tpv.TransactionDate) <= '2022-04-30'
+    AND hub.SalesStructureNameLevel2 = 'FRANQUIA'
+  GROUP BY
+    LAST_DAY(tpv.TransactionDate),
+    hub.SalesStructureNameLevel5
+),
+
+RAV AS
+
+(
+  SELECT
+    LAST_DAY(rav.ContractDate) as mes_referencia,
+    hub.SalesStructureNameLevel5 as polo,
+    SUM(rav.FundingCost) as funding_cost,
+    SUM(rav.GrossValue) as tpv_antecipado,
+    SUM(rav.Revenue) as rav_revenue,
+    SUM(rav.DX) as dx,
+    SUM(rav.GrossValue)/nullif(SUM(rav.DX), 0) as duration
+  FROM
+    `ctra-comercial-1554819299431.core_dw_replica.FactRav` rav
+  JOIN
+    `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` aff
+      ON rav.AffiliationKey = aff.AffiliationKey
+  JOIN
+    `ctra-comercial-1554819299431.core_dw_replica.ClientListHubs` hub
+      ON aff.ClientKey = hub.ClientKey
+  WHERE 1=1
+    AND LAST_DAY(rav.ContractDate) >= '2021-04-01'
+    AND LAST_DAY(rav.ContractDate) <= '2022-04-30'
+    AND hub.SalesStructureNameLevel2 = 'FRANQUIA'
+  GROUP BY
+    LAST_DAY(rav.ContractDate),
+    hub.SalesStructureNameLevel5
+),
+
+BANK AS
+
+(
+  with aux_bank as
+  (
+  SELECT
+    reference_month,
+    dwaff.ClientKey,
+    gross_revenue_ex_floating as gross_revenue_ex_floating,
+    net_revenue_ex_floating as net_revenue_ex_floating,
+    prepaid_card_tpv as prepaid_card_tpv,
+    prepaid_card_interchange_revenue as prepaid_card_interchange_revenue,
+    pix_in_total_tpv as pix_in_total_tpv,
+    pix_in_total_revenue as pix_in_total_revenue,
+    pix_out_tpv as pix_out_tpv,
+    pix_out_revenue as pix_out_revenue,
+    pix_in_total_tpv + pix_out_tpv as pix_total_tpv,
+    pix_in_total_revenue + pix_out_revenue as pix_total_revenue
+  FROM `dataplatform-prd.conta_stone_analytics.vw_monthly_account_economics` bank
+    JOIN `ctra-comercial-1554819299431.core_apurations.tb_full_stone_affiliations` aff
+      ON aff.str_document = CAST(bank.owner_document AS STRING)
+    JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` as dwaff
+      ON aff.str_stonecode = CAST(dwaff.ClientAlternateKey AS STRING)
+  WHERE 1=1
+    AND bank.reference_month >= '2021-04-01'
+    AND bank.reference_month <= '2022-04-30'
+  QUALIFY
+    row_number() OVER (PARTITION BY bank.reference_month, dwaff.ClientKey) = 1
+  )
+  select
+    reference_month,
+    hub.SalesStructureNameLevel5,
+    SUM(gross_revenue_ex_floating) as gross_revenue_ex_floating,
+    SUM(net_revenue_ex_floating) as net_revenue_ex_floating,
+    SUM(prepaid_card_tpv) as prepaid_card_tpv,
+    SUM(prepaid_card_interchange_revenue) as prepaid_card_interchange_revenue,
+    SUM(pix_in_total_tpv) as pix_in_total_tpv,
+    SUM(pix_in_total_revenue) as pix_in_total_revenue,
+    SUM(pix_out_tpv) as pix_out_tpv,
+    SUM(pix_out_revenue) as pix_out_revenue,
+    SUM(pix_total_tpv) as pix_total_tpv,
+    SUM(pix_total_revenue) as pix_total_revenue
+  from aux_bank
+  join `ctra-comercial-1554819299431.core_dw_replica.ClientListHubs` hub
+    on aux_bank.ClientKey = hub.ClientKey
+  where 1=1
+    and hub.SalesStructureNameLevel2 = 'FRANQUIA'
+  group by
+    reference_month,
+    hub.SalesStructureNameLevel5
+)
+
+
+
+SELECT
+  TPV.mes_referencia,
+  TPV.polo,
+  TPV.net_mdr_credito,
+  TPV.net_mdr_debito,
+  TPV.tpv_credito,
+  TPV.tpv_debito,
+  TPV.mdr_credito,
+  TPV.mdr_debito,
+  TPV.pct_net_mdr_credito,
+  TPV.pct_net_mdr_debito,
+  RAV.funding_cost,
+  RAV.tpv_antecipado,
+  RAV.rav_revenue,
+  RAV.dx,
+  RAV.duration,
+  BANK.gross_revenue_ex_floating,
+  BANK.net_revenue_ex_floating,
+  BANK.prepaid_card_tpv,
+  BANK.prepaid_card_interchange_revenue,
+  BANK.pix_in_total_tpv,
+  BANK.pix_in_total_revenue,
+  BANK.pix_out_tpv,
+  BANK.pix_out_revenue,
+  BANK.pix_total_tpv,
+  BANK.pix_total_revenue
+FROM TPV
+LEFT JOIN RAV
+  ON TPV.mes_referencia = RAV.mes_referencia AND TPV.polo = RAV.polo
+LEFT JOIN BANK
+  ON LAST_DAY(TPV.mes_referencia) = LAST_DAY(BANK.reference_month) AND TPV.polo = BANK.SalesStructureNameLevel5
