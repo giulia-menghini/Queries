@@ -1,0 +1,211 @@
+WITH
+
+date_series AS (
+SELECT
+    LAST_DAY(dt_date) AS dt_date,
+    date('2022-04-30') AS dt_alfa,
+FROM
+    UNNEST(GENERATE_DATE_ARRAY(date_sub(date('2022-04-30'), interval 12 month), date('2022-04-30'), INTERVAL 1 MONTH)) AS dt_date
+),
+
+monthly_tpv AS (
+SELECT
+    LAST_DAY(ftpv.TransactionDate) AS dt_date,
+    affiliation.ClientKey AS int_client_key,
+    sum(ftpv.TPV) AS num_tpv,
+    sum(ftpv.DIA) AS num_net_mdr_revenue,
+FROM
+    `ctra-comercial-1554819299431.core_dw_replica.FactTPV` ftpv
+    JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` affiliation
+        ON affiliation.AffiliationKey = ftpv.AffiliationKey
+WHERE
+    1=1
+    AND ftpv.TransactionDate >= LAST_DAY(DATE_SUB(CURRENT_DATE(), INTERVAL 14 MONTH))
+    AND ftpv.TransactionDate <= (SELECT dss.dt_alfa FROM date_series dss LIMIT 1)
+GROUP BY
+    dt_date,
+    int_client_key
+),
+
+monthly_rav AS (
+SELECT
+    LAST_DAY(frav.ContractDate) AS dt_date,
+    affiliation.ClientKey AS int_client_key,
+    sum(frav.Revenue) AS num_rav_revenue,
+    sum(frav.Revenue - frav.FundingCost) AS num_rav_ncof_revenue,
+FROM
+    `ctra-comercial-1554819299431.core_dw_replica.FactRav` frav
+    JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` affiliation
+        ON affiliation.AffiliationKey = frav.AffiliationKey
+WHERE
+    1=1
+    AND frav.ContractDate >= LAST_DAY(DATE_SUB(CURRENT_DATE(), INTERVAL 14 MONTH))
+    AND frav.ContractDate <= (SELECT dss.dt_alfa FROM date_series dss LIMIT 1)
+GROUP BY
+    dt_date,
+    int_client_key
+),
+
+monthly_billing_charges AS (
+    SELECT
+        charge.dt_date,
+        dw_affiliation.ClientKey AS int_client_key,
+        sum(if(
+            charge.str_chargeable IN ('stone.rent', 'stone.rent.volume-exemption', 'stone.rent.cancellation'),
+            charge.flo_amount, 0
+        )) AS num_subscription_revenue,
+        sum(if(
+            charge.str_chargeable IN ('vitta.life-insurance'),
+            charge.flo_amount, 0
+        )) AS num_life_insurance_revenue,
+        sum(if(
+            charge.str_chargeable IN ('vitta.store-insurance'),
+            charge.flo_amount, 0
+        )) AS num_store_insurance_revenue,
+    FROM
+        `ctra-comercial-1554819299431.core_apurations.tb_monthly_billing_charges` charge
+        JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` dw_affiliation
+            ON cast(dw_affiliation.ClientAlternateKey as string) = charge.str_stonecode
+    WHERE
+        1=1
+        AND charge.dt_date >= LAST_DAY(DATE_SUB(CURRENT_DATE(), INTERVAL 14 MONTH))
+    GROUP BY
+        charge.dt_date,
+        dw_affiliation.ClientKey
+),
+
+monthly_banking_revenues AS (
+    SELECT
+        banking_revenues.dt_date,
+        dw_affiliation.ClientKey AS int_client_key,
+        banking_revenues.flo_interchange_revenue AS num_interchange_revenue,
+        banking_revenues.flo_m0_barcode_revenue AS num_barcode_revenue,
+        banking_revenues.flo_pix_revenue AS num_pix_revenue,
+        banking_revenues.flo_ted_revenue AS num_ted_revenue,
+    FROM
+        `ctra-comercial-1554819299431.core_apurations.tb_full_banking_monthly_revenues` banking_revenues
+        JOIN `ctra-comercial-1554819299431.core_apurations.tb_full_stone_affiliations` affiliation
+            ON affiliation.str_document = banking_revenues.str_document
+        JOIN `ctra-comercial-1554819299431.core_dw_replica.DimAffiliation` dw_affiliation
+            ON cast(dw_affiliation.ClientAlternateKey as string) = affiliation.str_stonecode
+    WHERE
+        1=1
+        AND banking_revenues.dt_date >= LAST_DAY(DATE_SUB(CURRENT_DATE(), INTERVAL 14 MONTH))
+    QUALIFY
+        row_number() OVER (PARTITION BY banking_revenues.dt_date, dw_affiliation.ClientKey) = 1
+),
+
+dss_stone_client_portfolio AS (
+SELECT
+    dss.dt_date,
+    client.*,
+    client.str_affiliator_vendor_sales_force_name IN ('FRANQUIAS') AS is_sf_pp,
+    (
+        date_trunc(client.dt_activation, MONTH) < date_trunc(dss.dt_date, MONTH)
+        OR client.str_affiliator_vendor_sales_force_name IN ('FRANQUIAS')
+    ) AS is_ppm0,
+    (
+        date_trunc(client.dt_activation, QUARTER) < date_trunc(dss.dt_date, QUARTER)
+        OR client.str_affiliator_vendor_sales_force_name IN ('FRANQUIAS')
+    ) AS is_ppq0,
+    coalesce(tpvm0.num_tpv, 0) > 1 AS is_ab_active_base,
+    (
+        coalesce(tpvm0.num_tpv, 0) > 1
+        AND LAST_DAY(client.dt_activation) = LAST_DAY(DATE_SUB(dss.dt_date, INTERVAL 0 MONTH))
+    ) AS is_ab_new_active,
+    (
+        coalesce(tpvm1.num_tpv, 0) > 1
+        AND coalesce(tpvm0.num_tpv, 0) <= 1
+    ) AS is_ab_churn,
+    (
+        coalesce(tpvm0.num_tpv, 0) > 1
+        AND coalesce(tpvm1.num_tpv, 0) <= 1
+        AND (LAST_DAY(client.dt_activation) != LAST_DAY(DATE_SUB(dss.dt_date, INTERVAL 0 MONTH)) OR client.dt_activation IS NULL)
+    ) AS is_ab_reactivation,
+    coalesce(tpvm1.num_tpv, 0) > 1 AS is_ab_last_month_active_base,
+FROM
+    date_series dss
+    JOIN `ctra-comercial-1554819299431.core_apurations.generated_full_portfolio_2022_04_30` client ON 1=1
+    LEFT JOIN monthly_tpv tpvm0 ON tpvm0.int_client_key = client.int_client_key AND tpvm0.dt_date = dss.dt_date
+    LEFT JOIN monthly_tpv tpvm1 ON tpvm1.int_client_key = client.int_client_key AND tpvm1.dt_date = LAST_DAY(DATE_SUB(dss.dt_date, INTERVAL 1 MONTH))
+)
+SELECT
+    client.dt_reference,
+    dss.dt_date,
+    client.dt_alfa,
+    client.str_group_3,
+    countif(LAST_DAY(client.dt_affiliation) = LAST_DAY(DATE_SUB(dss.dt_date, INTERVAL 0 MONTH))) AS num_stone_new_clients_m0,
+    countif(LAST_DAY(client.dt_affiliation) = LAST_DAY(DATE_SUB(dss.dt_date, INTERVAL 0 MONTH)) AND client.is_sf_pp) AS num_stone_new_clients_m0_hubs,
+
+    countif(LAST_DAY(client.dt_activation) = LAST_DAY(DATE_SUB(dss.dt_date, INTERVAL 0 MONTH))) AS num_stone_new_actives_m0,
+    countif(LAST_DAY(client.dt_activation) = LAST_DAY(DATE_SUB(dss.dt_date, INTERVAL 0 MONTH)) AND client.is_sf_pp) AS num_stone_new_actives_m0_hubs,
+    countif(client.is_ab_active_base) AS num_stone_ab_active_base_m0,
+    countif(client.is_ab_new_active) AS num_stone_ab_new_actives_m0,
+    countif(client.is_ab_churn) AS num_stone_ab_churn_m0,
+    countif(client.is_ab_reactivation) AS num_stone_ab_reactivations_m0,
+    countif(client.is_ab_last_month_active_base) AS num_stone_ab_last_month_active_base_m0,
+    -- [3.2] PPM0
+    countif(client.is_ab_active_base AND client.is_ppm0) AS num_stone_ab_active_base_m0_ppm0,
+    countif(client.is_ab_new_active AND client.is_ppm0) AS num_stone_ab_new_actives_m0_ppm0,
+    countif(client.is_ab_churn AND client.is_ppm0) AS num_stone_ab_churn_m0_ppm0,
+    countif(client.is_ab_reactivation AND client.is_ppm0) AS num_stone_ab_reactivations_m0_ppm0,
+    countif(client.is_ab_last_month_active_base AND client.is_ppm0) AS num_stone_ab_last_month_active_base_m0_ppm0,
+    -- [3.3] PPQ0
+    countif(client.is_ab_active_base AND client.is_ppq0) AS num_stone_ab_active_base_m0_ppq0,
+    countif(client.is_ab_new_active AND client.is_ppq0) AS num_stone_ab_new_actives_m0_ppq0,
+    countif(client.is_ab_churn AND client.is_ppq0) AS num_stone_ab_churn_m0_ppq0,
+    countif(client.is_ab_reactivation AND client.is_ppq0) AS num_stone_ab_reactivations_m0_ppq0,
+    countif(client.is_ab_last_month_active_base AND client.is_ppq0) AS num_stone_ab_last_month_active_base_m0_ppq0,
+    -- [4] Stone TPV
+    sum(if(1=1, coalesce(tpvm0.num_tpv, 0), 0)) AS num_stone_tpv_acquirer_m0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(tpvm0.num_tpv, 0), 0)) AS num_stone_tpv_acquirer_m0_ppm0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(tpvm0.num_tpv, 0), 0)) AS num_stone_tpv_acquirer_m0_ppq0,
+    -- [5] Revenues
+    -- [5.1] Full
+    sum(if(1=1, coalesce(tpvm0.num_net_mdr_revenue, 0), 0)) AS num_stone_net_mdr_revenue_m0,
+    sum(if(1=1, coalesce(ravm0.num_rav_revenue, 0), 0)) AS num_stone_rav_revenue_m0,
+    sum(if(1=1, coalesce(ravm0.num_rav_ncof_revenue, 0), 0)) AS num_stone_rav_ncof_revenue_m0,
+    sum(if(1=1, coalesce(billingm0.num_subscription_revenue, 0), 0)) AS num_stone_subscription_revenue_m0,
+    sum(if(1=1, coalesce(billingm0.num_life_insurance_revenue, 0), 0)) AS num_life_insurance_revenue_m0,
+    sum(if(1=1, coalesce(billingm0.num_store_insurance_revenue, 0), 0)) AS num_store_insurance_revenue_m0,
+    sum(if(1=1, coalesce(bankingm0.num_interchange_revenue, 0), 0)) AS num_stone_interchange_revenue_m0,
+    sum(if(1=1, coalesce(bankingm0.num_pix_revenue, 0), 0)) AS num_stone_pix_revenue_m0,
+    sum(if(1=1, coalesce(bankingm0.num_barcode_revenue, 0), 0)) AS num_stone_barcode_revenue_m0,
+    sum(if(1=1, coalesce(bankingm0.num_ted_revenue, 0), 0)) AS num_stone_ted_revenue_m0,
+    -- [5.2] PPM0
+    sum(if(1=1 AND client.is_ppm0, coalesce(tpvm0.num_net_mdr_revenue, 0), 0)) AS num_stone_net_mdr_revenue_m0_ppm0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(ravm0.num_rav_revenue, 0), 0)) AS num_stone_rav_revenue_m0_ppm0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(ravm0.num_rav_ncof_revenue, 0), 0)) AS num_stone_rav_ncof_revenue_m0_ppm0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(billingm0.num_subscription_revenue, 0), 0)) AS num_stone_subscription_revenue_m0_ppm0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(billingm0.num_life_insurance_revenue, 0), 0)) AS num_life_insurance_revenue_m0_ppm0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(billingm0.num_store_insurance_revenue, 0), 0)) AS num_store_insurance_revenue_m0_ppm0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(bankingm0.num_interchange_revenue, 0), 0)) AS num_stone_interchange_revenue_m0_ppm0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(bankingm0.num_pix_revenue, 0), 0)) AS num_stone_pix_revenue_m0_ppm0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(bankingm0.num_barcode_revenue, 0), 0)) AS num_stone_barcode_revenue_m0_ppm0,
+    sum(if(1=1 AND client.is_ppm0, coalesce(bankingm0.num_ted_revenue, 0), 0)) AS num_stone_ted_revenue_m0_ppm0,
+    -- [5.3] PPQ0
+    sum(if(1=1 AND client.is_ppq0, coalesce(tpvm0.num_net_mdr_revenue, 0), 0)) AS num_stone_net_mdr_revenue_m0_ppq0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(ravm0.num_rav_revenue, 0), 0)) AS num_stone_rav_revenue_m0_ppq0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(ravm0.num_rav_ncof_revenue, 0), 0)) AS num_stone_rav_ncof_revenue_m0_ppq0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(billingm0.num_subscription_revenue, 0), 0)) AS num_stone_subscription_revenue_m0_ppq0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(billingm0.num_life_insurance_revenue, 0), 0)) AS num_life_insurance_revenue_m0_ppq0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(billingm0.num_store_insurance_revenue, 0), 0)) AS num_store_insurance_revenue_m0_ppq0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(bankingm0.num_interchange_revenue, 0), 0)) AS num_stone_interchange_revenue_m0_ppq0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(bankingm0.num_pix_revenue, 0), 0)) AS num_stone_pix_revenue_m0_ppq0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(bankingm0.num_barcode_revenue, 0), 0)) AS num_stone_barcode_revenue_m0_ppq0,
+    sum(if(1=1 AND client.is_ppq0, coalesce(bankingm0.num_ted_revenue, 0), 0)) AS num_stone_ted_revenue_m0_ppq0,
+FROM
+    date_series dss
+    JOIN dss_stone_client_portfolio client ON client.dt_date = dss.dt_date
+    LEFT JOIN monthly_tpv tpvm0 ON tpvm0.int_client_key = client.int_client_key AND tpvm0.dt_date = dss.dt_date
+    LEFT JOIN monthly_rav ravm0 ON ravm0.int_client_key = client.int_client_key AND ravm0.dt_date = dss.dt_date
+    LEFT JOIN monthly_billing_charges billingm0 ON billingm0.int_client_key = client.int_client_key AND billingm0.dt_date = dss.dt_date
+    LEFT JOIN monthly_banking_revenues  bankingm0 ON bankingm0.int_client_key = client.int_client_key AND bankingm0.dt_date = dss.dt_date
+GROUP BY
+    dss.dt_date,
+    client.dt_alfa,
+    client.dt_reference,
+    client.str_group_3
+ORDER BY
+    dss.dt_date DESC
+;
